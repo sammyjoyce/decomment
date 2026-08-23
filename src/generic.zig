@@ -22,10 +22,19 @@ pub const StringSyntax = struct {
     doubled_end: bool = false,
 };
 
+/// A literal that begins with `start` and ends at the end of the line. It has
+/// no closing delimiter and no escape processing, so every remaining byte on
+/// the line is literal text. Zig multiline string literals (`\\...`) are the
+/// built-in user.
+pub const LineString = struct {
+    start: []const u8,
+};
+
 pub const Profile = struct {
     line_comments: []const LineComment = &.{},
     block_comments: []const BlockComment = &.{},
     strings: []const StringSyntax = &.{},
+    line_strings: []const LineString = &.{},
     preserve_hashbang: bool = false,
 };
 
@@ -73,6 +82,11 @@ const Scanner = struct {
                 continue;
             }
 
+            if (self.matchLineString()) |line_string| {
+                self.skipLineString(line_string);
+                self.line_has_code = true;
+                continue;
+            }
             if (self.matchString()) |syntax| {
                 self.scanString(syntax);
                 self.line_has_code = true;
@@ -92,22 +106,27 @@ const Scanner = struct {
         }
     }
 
-    fn matchString(self: *Scanner) ?*const StringSyntax {
-        var best: ?*const StringSyntax = null;
-        for (self.profile.strings) |*syntax| {
-            if (!self.startsWith(syntax.start)) continue;
-            if (best == null or syntax.start.len > best.?.start.len) best = syntax;
+    /// Longest-start-wins lookup over any syntax table whose entries carry a
+    /// `start` prefix.
+    fn matchLongestStart(self: *const Scanner, comptime Syntax: type, table: []const Syntax) ?*const Syntax {
+        var best: ?*const Syntax = null;
+        for (table) |*candidate| {
+            if (!self.startsWith(candidate.start)) continue;
+            if (best == null or candidate.start.len > best.?.start.len) best = candidate;
         }
         return best;
     }
 
+    fn matchString(self: *Scanner) ?*const StringSyntax {
+        return self.matchLongestStart(StringSyntax, self.profile.strings);
+    }
+
+    fn matchLineString(self: *Scanner) ?*const LineString {
+        return self.matchLongestStart(LineString, self.profile.line_strings);
+    }
+
     fn matchBlock(self: *Scanner) ?*const BlockComment {
-        var best: ?*const BlockComment = null;
-        for (self.profile.block_comments) |*block| {
-            if (!self.startsWith(block.start)) continue;
-            if (best == null or block.start.len > best.?.start.len) best = block;
-        }
-        return best;
+        return self.matchLongestStart(BlockComment, self.profile.block_comments);
     }
 
     fn matchLine(self: *Scanner) ?*const LineComment {
@@ -125,6 +144,15 @@ const Scanner = struct {
             .line_start => !self.line_has_code,
             .token_boundary => self.i == 0 or isWhitespaceByte(self.source[self.i - 1]) or isDelimiterByte(self.source[self.i - 1]),
         };
+    }
+
+    /// Consumes the rest of the line as literal text. The line terminator is
+    /// left for `run` so that line bookkeeping stays in one place.
+    fn skipLineString(self: *Scanner, line_string: *const LineString) void {
+        self.i += line_string.start.len;
+        while (self.i < self.source.len and lineTerminatorLen(self.source, self.i) == 0) {
+            self.i += codePointLen(self.source, self.i);
+        }
     }
 
     fn scanString(self: *Scanner, syntax: *const StringSyntax) void {
@@ -288,6 +316,28 @@ test "non-ascii comment text is blanked with ascii spaces only" {
     var result = try stripAlloc(std.testing.allocator, "x; // en dash \xE2\x80\x93 here\ny;", &p);
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("x;                    \ny;", result.code);
+}
+
+test "line strings run to end of line and take no escapes" {
+    const p = Profile{
+        .line_comments = &.{.{ .start = "//" }},
+        .strings = &.{.{ .start = "\"", .end = "\"" }},
+        .line_strings = &.{.{ .start = "\\\\" }},
+    };
+    // The unclosed quote proves a line string cannot leak string state onto the
+    // next line, and the trailing backslash proves escapes are not honoured.
+    const source =
+        \\    \\ raw // text "unclosed \\
+        \\code(); // gone
+        \\
+    ;
+    var result = try stripAlloc(std.testing.allocator, source, &p);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+    try std.testing.expectEqual(source.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "raw // text \"unclosed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "gone") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "code();") != null);
 }
 
 test "nested block comments" {

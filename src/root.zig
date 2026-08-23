@@ -195,7 +195,14 @@ const go_profile = generic.Profile{
     .block_comments = &.{.{ .start = "/*", .end = "*/" }},
     .strings = &quote_go,
 };
-const zig_profile = generic.Profile{ .line_comments = &.{.{ .start = "//" }}, .strings = &quote_c };
+// Zig has no block comments. `//`, `///` and `//!` are all line comments, and
+// `\\` starts a multiline string literal that runs to the end of the line with
+// no escape processing, so its contents must never be scanned for comments.
+const zig_profile = generic.Profile{
+    .line_comments = &.{.{ .start = "//" }},
+    .strings = &quote_c,
+    .line_strings = &.{.{ .start = "\\\\" }},
+};
 const python_profile = generic.Profile{ .line_comments = &.{.{ .start = "#" }}, .strings = &quote_triple, .preserve_hashbang = true };
 const shell_profile = generic.Profile{ .line_comments = &.{.{ .start = "#", .boundary = .token_boundary }}, .strings = &quote_shell, .preserve_hashbang = true };
 const sql_profile = generic.Profile{ .line_comments = &.{.{ .start = "--" }}, .block_comments = &.{.{ .start = "/*", .end = "*/" }}, .strings = &quote_sql };
@@ -225,7 +232,8 @@ pub const plugins = struct {
     pub const csharp = genericPlugin("csharp", &.{ "csharp", "c#", "cs" }, &.{".cs"}, &c_profile, "");
     pub const go = genericPlugin("go", &.{"go"}, &.{".go"}, &go_profile, "");
     pub const rust = genericPlugin("rust", &.{ "rust", "rs" }, &.{".rs"}, &nested_c_profile, "raw strings with comment markers require a dedicated Rust plugin implementation");
-    pub const zig = genericPlugin("zig", &.{"zig"}, &.{".zig"}, &zig_profile, "");
+    /// Also covers ZON, which shares Zig's comment and string-literal syntax.
+    pub const zig = genericPlugin("zig", &.{ "zig", "zon" }, &.{ ".zig", ".zon" }, &zig_profile, "");
     pub const swift = genericPlugin("swift", &.{"swift"}, &.{".swift"}, &nested_c_profile, "");
     pub const kotlin = genericPlugin("kotlin", &.{ "kotlin", "kt" }, &.{ ".kt", ".kts" }, &nested_c_profile, "");
     pub const dart = genericPlugin("dart", &.{"dart"}, &.{".dart"}, &nested_c_profile, "");
@@ -344,6 +352,39 @@ test "all stripping routes through plugins" {
     defer py.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), py.comments_removed);
     try std.testing.expect(std.mem.indexOf(u8, py.code, "# keep") != null);
+}
+
+test "zig multiline string literals are never scanned for comments" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+
+    const source =
+        \\//! container doc
+        \\const url =
+        \\    \\ https://ziglang.org // still string text
+        \\    \\ const fake = 1; // still string text
+        \\;
+        \\const slash = '/'; /// doc comment
+        \\
+    ;
+
+    var result = try system.stripAlloc(allocator, source, .{ .path = "sample.zig" });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.comments_removed);
+    try std.testing.expectEqual(source.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "https://ziglang.org // still string text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const fake = 1; // still string text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const slash = '/';") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "container doc") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "doc comment") == null);
+}
+
+test "zig plugin also resolves zon" {
+    var system = builtinSystem();
+    try std.testing.expect(system.resolvePath("build.zig.zon") == &plugins.zig);
+    try std.testing.expect(system.resolvePath("src/main.zig") == &plugins.zig);
+    try std.testing.expect(system.resolveName("zon") == &plugins.zig);
 }
 
 test "plugin dependencies behave as reactive coeffects" {
