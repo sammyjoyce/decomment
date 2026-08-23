@@ -58,6 +58,23 @@ The system includes internal plugins for ECMAScript, C, C++, Java, C#, Go, Rust,
 
 Some generic-profile plugins still have explicitly documented lexical gaps: Rust raw strings, SQL dialect-specific dollar quoting, and Lua long brackets with equals signs. Those can be replaced by dedicated plugin implementations without changing the `System` API or the other plugins.
 
+## Zig plugin
+
+The internal `zig` plugin accepts the language names `zig` and `zon`, and detects `.zig` and `.zon`. ZON shares Zig's comment and literal syntax, so both use one plugin.
+
+It removes `//` line comments, `///` doc comments, and `//!` container doc comments. Zig has no block comments, so `/*` and `*/` are never treated as comment markers.
+
+Multiline string literals are preserved verbatim. A `\\` literal runs to the end of the line, takes no escapes, and has no closing delimiter, so its contents are never scanned for comment markers:
+
+```zig
+const help =
+    \\ See https://ziglang.org for docs
+    \\ const example = 1; // not a comment
+;
+```
+
+Both `//` sequences above survive stripping. This is expressed in the generic engine as `Profile.line_strings`, a literal that begins with a prefix and ends at the line break.
+
 ## Library
 
 ```zig
