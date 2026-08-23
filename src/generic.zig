@@ -210,6 +210,16 @@ fn doubled(end: []const u8) []const u8 {
     return if (std.mem.eql(u8, end, "'")) "''" else if (std.mem.eql(u8, end, "\"")) "\"\"" else if (std.mem.eql(u8, end, "`")) "``" else end;
 }
 
+/// Replaces a comment span with ASCII spaces, keeping line terminators and any
+/// whitespace that is already there. Byte length and every following byte
+/// offset are preserved.
+///
+/// A multi-byte code point becomes that many spaces rather than one same-width
+/// Unicode space. The ECMAScript scanner does the opposite because JS treats
+/// U+00A0 and U+2000 as whitespace, so it can also keep UTF-16 columns stable.
+/// Most other languages accept only ASCII whitespace between tokens, so reusing
+/// that trick here would turn any comment holding a non-ASCII character, such as
+/// an en dash, into a syntax error.
 fn blankRange(output: []u8, start: usize, end: usize) void {
     var cursor = start;
     while (cursor < end) {
@@ -218,19 +228,8 @@ fn blankRange(output: []u8, start: usize, end: usize) void {
             cursor += ll;
             continue;
         }
-        if (isWhitespaceAt(output, cursor)) {
-            cursor += codePointLen(output, cursor);
-            continue;
-        }
-        const n = codePointLen(output, cursor);
-        switch (n) {
-            1 => output[cursor] = ' ',
-            2 => output[cursor..][0..2].* = "\xC2\xA0".*,
-            3 => output[cursor..][0..3].* = "\xE2\x80\x80".*,
-            4 => output[cursor..][0..4].* = "\xC2\xA0\xC2\xA0".*,
-            else => unreachable,
-        }
-        cursor += n;
+        if (!isWhitespaceAt(output, cursor)) output[cursor] = ' ';
+        cursor += 1;
     }
 }
 
@@ -279,6 +278,16 @@ test "generic c-like preserves strings" {
     try std.testing.expectEqual(@as(usize, 2), result.comments_removed);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "https://x") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "bye") == null);
+}
+
+test "non-ascii comment text is blanked with ascii spaces only" {
+    const p = Profile{ .line_comments = &.{.{ .start = "//" }} };
+    // The en dash is three UTF-8 bytes. It must become three ASCII spaces, not
+    // one same-width Unicode space, or the result stops being valid in every
+    // language that accepts only ASCII whitespace between tokens.
+    var result = try stripAlloc(std.testing.allocator, "x; // en dash \xE2\x80\x93 here\ny;", &p);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("x;                    \ny;", result.code);
 }
 
 test "nested block comments" {
