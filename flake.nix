@@ -10,28 +10,17 @@
     let
       inherit (nixpkgs) lib;
 
+      # No x86_64-darwin: nixpkgs unstable removed it after the 25.11
+      # deprecation. Core packages (bash, stdenv, ...) no longer carry it in
+      # meta.platforms, so its outputs would not even evaluate.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
 
-      # nixpkgs 26.11 keeps x86_64-darwin in legacyPackages only to show its
-      # deprecation error. Import it directly with the documented escape hatch
-      # so every required system still has evaluable flake outputs.
-      pkgsFor =
-        system:
-        if system == "x86_64-darwin" then
-          import nixpkgs.outPath {
-            inherit system;
-            config.allowDeprecatedx86_64Darwin = "force";
-          }
-        else
-          nixpkgs.legacyPackages.${system};
-
       # Small helper instead of flake-utils: `f` receives the system and its pkgs.
-      forAllSystems = f: lib.genAttrs systems (system: f system (pkgsFor system));
+      forAllSystems = f: lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
 
       # build.zig.zon is the single source of truth for the version (build.zig
       # imports it as well), so read it here instead of duplicating the number.
