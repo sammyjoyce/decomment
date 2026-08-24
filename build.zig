@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// build.zig.zon is the single source of truth for the version, so `--version`
+/// and the package metadata can never drift apart.
+const version = @import("build.zig.zon").version;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -9,13 +13,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
+
     const exe = b.addExecutable(.{
         .name = "decomment",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "decomment", .module = decomment }},
+            .imports = &.{
+                .{ .name = "decomment", .module = decomment },
+                .{ .name = "build_options", .module = options.createModule() },
+            },
         }),
     });
     b.installArtifact(exe);

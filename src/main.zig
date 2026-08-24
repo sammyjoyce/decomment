@@ -1,5 +1,6 @@
 const std = @import("std");
 const decomment = @import("decomment");
+const build_options = @import("build_options");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -53,7 +54,7 @@ fn run(init: std.process.Init) !u8 {
         return 0;
     }
     if (cli.version) {
-        try Io.File.stdout().writeStreamingAll(init.io, "decomment 0.3.0\n");
+        try Io.File.stdout().writeStreamingAll(init.io, "decomment " ++ build_options.version ++ "\n");
         return 0;
     }
     if (cli.list_languages) {
