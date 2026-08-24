@@ -77,31 +77,63 @@ fn parseArgs(allocator: Allocator, args: []const []const u8) (Allocator.Error ||
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (!positional_only and std.mem.eql(u8, arg, "--")) { positional_only = true; continue; }
-        if (!positional_only and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) { cli.help = true; continue; }
-        if (!positional_only and (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version"))) { cli.version = true; continue; }
+        if (!positional_only and std.mem.eql(u8, arg, "--")) {
+            positional_only = true;
+            continue;
+        }
+        if (!positional_only and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
+            cli.help = true;
+            continue;
+        }
+        if (!positional_only and (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version"))) {
+            cli.version = true;
+            continue;
+        }
         if (!positional_only and (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--write"))) {
             if (cli.mode == .check) return error.ConflictingModes;
-            cli.mode = .write; continue;
+            cli.mode = .write;
+            continue;
         }
         if (!positional_only and (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--check"))) {
             if (cli.mode == .write) return error.ConflictingModes;
-            cli.mode = .check; continue;
+            cli.mode = .check;
+            continue;
         }
-        if (!positional_only and std.mem.eql(u8, arg, "--jsx")) { cli.jsx_override = true; continue; }
-        if (!positional_only and std.mem.eql(u8, arg, "--no-jsx")) { cli.jsx_override = false; continue; }
+        if (!positional_only and std.mem.eql(u8, arg, "--jsx")) {
+            cli.jsx_override = true;
+            continue;
+        }
+        if (!positional_only and std.mem.eql(u8, arg, "--no-jsx")) {
+            cli.jsx_override = false;
+            continue;
+        }
         if (!positional_only and (std.mem.eql(u8, arg, "-l") or std.mem.eql(u8, arg, "--language"))) {
-            i += 1; if (i >= args.len) return error.MissingLanguage; cli.language = args[i]; continue;
+            i += 1;
+            if (i >= args.len) return error.MissingLanguage;
+            cli.language = args[i];
+            continue;
         }
         if (!positional_only and std.mem.startsWith(u8, arg, "--language=")) {
-            const value = arg["--language=".len..]; if (value.len == 0) return error.MissingLanguage; cli.language = value; continue;
+            const value = arg["--language=".len..];
+            if (value.len == 0) return error.MissingLanguage;
+            cli.language = value;
+            continue;
         }
-        if (!positional_only and std.mem.eql(u8, arg, "--list-languages")) { cli.list_languages = true; continue; }
+        if (!positional_only and std.mem.eql(u8, arg, "--list-languages")) {
+            cli.list_languages = true;
+            continue;
+        }
         if (!positional_only and (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output"))) {
-            i += 1; if (i >= args.len) return error.MissingOutputPath; cli.output_path = args[i]; continue;
+            i += 1;
+            if (i >= args.len) return error.MissingOutputPath;
+            cli.output_path = args[i];
+            continue;
         }
         if (!positional_only and std.mem.startsWith(u8, arg, "--output=")) {
-            const value = arg["--output=".len..]; if (value.len == 0) return error.MissingOutputPath; cli.output_path = value; continue;
+            const value = arg["--output=".len..];
+            if (value.len == 0) return error.MissingOutputPath;
+            cli.output_path = value;
+            continue;
         }
         if (!positional_only and arg.len > 1 and arg[0] == '-') return error.UnknownOption;
         try cli.inputs.append(allocator, arg);
@@ -144,8 +176,7 @@ fn emitOne(io: Io, allocator: Allocator, cli: Cli) !u8 {
     defer result.deinit(allocator);
 
     if (cli.output_path) |output_path| {
-        if (std.mem.eql(u8, output_path, "-")) try Io.File.stdout().writeStreamingAll(io, result.code)
-        else try writeAtomic(io, output_path, result.code, null);
+        if (std.mem.eql(u8, output_path, "-")) try Io.File.stdout().writeStreamingAll(io, result.code) else try writeAtomic(io, output_path, result.code, null);
     } else try Io.File.stdout().writeStreamingAll(io, result.code);
     return 0;
 }
@@ -153,15 +184,26 @@ fn emitOne(io: Io, allocator: Allocator, cli: Cli) !u8 {
 fn writeFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
     for (cli.inputs.items) |path| {
         var result = stripPath(io, allocator, path, cli.language, cli.jsx_override) catch |err| {
-            reportPathError(path, err); return error.Reported;
+            reportPathError(path, err);
+            return error.Reported;
         };
         defer result.deinit(allocator);
         if (result.comments_removed == 0) continue;
 
-        const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| { reportPathError(path, err); return error.Reported; };
-        const stat = file.stat(io) catch |err| { file.close(io); reportPathError(path, err); return error.Reported; };
+        const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+            reportPathError(path, err);
+            return error.Reported;
+        };
+        const stat = file.stat(io) catch |err| {
+            file.close(io);
+            reportPathError(path, err);
+            return error.Reported;
+        };
         file.close(io);
-        writeAtomic(io, path, result.code, stat.permissions) catch |err| { reportPathError(path, err); return error.Reported; };
+        writeAtomic(io, path, result.code, stat.permissions) catch |err| {
+            reportPathError(path, err);
+            return error.Reported;
+        };
     }
     return 0;
 }
@@ -169,14 +211,26 @@ fn writeFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
 fn checkFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
     var changed = false;
     if (cli.inputs.items.len == 0) {
-        var result = stripPath(io, allocator, "-", cli.language, cli.jsx_override) catch |err| { reportPathError("stdin", err); return error.Reported; };
+        var result = stripPath(io, allocator, "-", cli.language, cli.jsx_override) catch |err| {
+            reportPathError("stdin", err);
+            return error.Reported;
+        };
         defer result.deinit(allocator);
-        if (result.comments_removed != 0) { std.debug.print("stdin: {d} comment{s}\n", .{ result.comments_removed, if (result.comments_removed == 1) "" else "s" }); changed = true; }
+        if (result.comments_removed != 0) {
+            std.debug.print("stdin: {d} comment{s}\n", .{ result.comments_removed, if (result.comments_removed == 1) "" else "s" });
+            changed = true;
+        }
     } else {
         for (cli.inputs.items) |path| {
-            var result = stripPath(io, allocator, path, cli.language, cli.jsx_override) catch |err| { reportPathError(path, err); return error.Reported; };
+            var result = stripPath(io, allocator, path, cli.language, cli.jsx_override) catch |err| {
+                reportPathError(path, err);
+                return error.Reported;
+            };
             defer result.deinit(allocator);
-            if (result.comments_removed != 0) { std.debug.print("{s}: {d} comment{s}\n", .{ path, result.comments_removed, if (result.comments_removed == 1) "" else "s" }); changed = true; }
+            if (result.comments_removed != 0) {
+                std.debug.print("{s}: {d} comment{s}\n", .{ path, result.comments_removed, if (result.comments_removed == 1) "" else "s" });
+                changed = true;
+            }
         }
     }
     return if (changed) 1 else 0;
