@@ -1,5 +1,7 @@
 # decomment
 
+[![CI](https://github.com/sammyjoyce/decomment/actions/workflows/ci.yml/badge.svg)](https://github.com/sammyjoyce/decomment/actions/workflows/ci.yml)
+
 A dependency-free Zig CLI and library for removing source-code comments while preserving byte length and line positions.
 
 ## One system, internal plugins
