@@ -7,6 +7,9 @@ pub const Options = struct {
     /// quoted attributes is preserved; comments inside `{ ... }` expressions
     /// are removed.
     jsx: bool = false,
+    /// Enable TypeScript-only JSX ambiguities such as generic arrow functions.
+    /// JavaScript/JSX mode always prefers valid JSX tag syntax.
+    typescript: bool = false,
 };
 
 pub const Result = struct {
@@ -720,42 +723,47 @@ const Scanner = struct {
         const next = self.source[self.i + 1];
         if (next == '>') return true; // fragment
         if (!(isAsciiIdentifierStart(next) or next >= 0x80)) return false;
+        if (!self.options.typescript) return true;
+        return !self.looksLikeGenericArrowStart();
+    }
 
-        // Avoid the unambiguous generic-arrow forms used in TSX:
-        // `<T,>(x) => x` and `<T extends U>(x) => x`.
+    // TSX requires a disambiguating type-parameter marker before a generic
+    // arrow can take priority over JSX. Prove that prefix without parsing the
+    // arrow's parameter list or return type.
+    fn looksLikeGenericArrowStart(self: *const Scanner) bool {
         var cursor = self.i + 1;
-        var saw_type_marker = false;
-        var quote: u8 = 0;
-        while (cursor < self.source.len and cursor - self.i <= 512) : (cursor += 1) {
-            const c = self.source[cursor];
-            if (quote != 0) {
-                if (c == quote) quote = 0;
-                continue;
-            }
-            if (c == '\'' or c == '"') {
-                quote = c;
-                continue;
-            }
-            if (c == ',') saw_type_marker = true;
-            if (std.mem.startsWith(u8, self.source[cursor..], "extends") and
-                (cursor == self.i + 1 or !isAsciiIdentifierPart(self.source[cursor - 1])) and
-                (cursor + 7 >= self.source.len or !isAsciiIdentifierPart(self.source[cursor + 7])))
-            {
-                saw_type_marker = true;
-            }
-            if (c == '>') {
-                if (!saw_type_marker) return true;
-                cursor += 1;
-                while (cursor < self.source.len) {
-                    const ws_len = whitespaceLen(self.source, cursor);
-                    if (ws_len == 0) break;
-                    cursor += ws_len;
-                }
-                return !(cursor < self.source.len and self.source[cursor] == '(');
-            }
-            if (lineTerminatorLen(self.source, cursor) != 0) return true;
+        const first_name_start = cursor;
+        cursor = consumeIdentifier(self.source, cursor);
+        const first_name = self.source[first_name_start..cursor];
+
+        var parameter_name = first_name;
+        if (std.mem.eql(u8, first_name, "const")) {
+            const parameter_start = skipJsTrivia(self.source, cursor);
+            if (parameter_start == cursor or !isIdentifierStart(self.source, parameter_start)) return false;
+            cursor = consumeIdentifier(self.source, parameter_start);
+            parameter_name = self.source[parameter_start..cursor];
         }
-        return true;
+        if (isDisallowedTypeParameterName(parameter_name)) return false;
+
+        cursor = skipJsTrivia(self.source, cursor);
+        if (cursor >= self.source.len) return false;
+        if (self.source[cursor] == ',' or self.source[cursor] == '=') {
+            // The marker is sufficient; the bounded scan below finds the
+            // matching outer `>` and verifies that a parameter list follows.
+        } else if (isIdentifierStart(self.source, cursor)) {
+            const marker_end = consumeJsxName(self.source, cursor);
+            if (!std.mem.eql(u8, self.source[cursor..marker_end], "extends")) return false;
+            cursor = skipJsTrivia(self.source, marker_end);
+            if (cursor >= self.source.len or self.source[cursor] == '=' or
+                self.source[cursor] == '>' or std.mem.startsWith(u8, self.source[cursor..], "/>"))
+            {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        return hasGenericTypeParameterListFollowedByParen(self.source, self.i);
     }
 
     fn saveContext(self: *const Scanner) LexicalContext {
@@ -821,6 +829,96 @@ const Scanner = struct {
         return std.mem.startsWith(u8, self.source[self.i..], needle);
     }
 };
+
+fn hasGenericTypeParameterListFollowedByParen(source: []const u8, open_angle: usize) bool {
+    var cursor = open_angle + 1;
+    var angle_depth: usize = 1;
+    var quote: u8 = 0;
+    while (cursor < source.len and cursor - open_angle <= 512) {
+        const c = source[cursor];
+        if (quote != 0) {
+            if (c == '\\' and cursor + 1 < source.len) {
+                cursor += 2;
+                continue;
+            }
+            if (c == quote) quote = 0;
+            cursor += codePointLen(source, cursor);
+            continue;
+        }
+        if (c == '\'' or c == '"' or c == '`') {
+            quote = c;
+            cursor += 1;
+            continue;
+        }
+        const trivia_end = skipJsTrivia(source, cursor);
+        if (trivia_end != cursor) {
+            cursor = trivia_end;
+            continue;
+        }
+        if (c == '<') {
+            angle_depth += 1;
+        } else if (c == '>' and (cursor == 0 or source[cursor - 1] != '=')) {
+            angle_depth -= 1;
+            if (angle_depth == 0) {
+                cursor = skipJsTrivia(source, cursor + 1);
+                return cursor < source.len and source[cursor] == '(';
+            }
+        }
+        cursor += codePointLen(source, cursor);
+    }
+    return false;
+}
+
+// Skip ECMAScript trivia for JSX/generic-arrow lookahead without mutating output.
+fn skipJsTrivia(source: []const u8, index: usize) usize {
+    var cursor = index;
+    while (cursor < source.len) {
+        const line_len = lineTerminatorLen(source, cursor);
+        if (line_len != 0) {
+            cursor += line_len;
+            continue;
+        }
+        const whitespace_len = whitespaceLen(source, cursor);
+        if (whitespace_len != 0) {
+            cursor += whitespace_len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, source[cursor..], "//")) {
+            while (cursor < source.len and lineTerminatorLen(source, cursor) == 0) cursor += codePointLen(source, cursor);
+            continue;
+        }
+        if (std.mem.startsWith(u8, source[cursor..], "/*")) {
+            const comment_end = std.mem.indexOfPos(u8, source, cursor + 2, "*/") orelse return source.len;
+            cursor = comment_end + 2;
+            continue;
+        }
+        break;
+    }
+    return cursor;
+}
+
+fn consumeJsxName(source: []const u8, index: usize) usize {
+    var cursor = index;
+    while (cursor < source.len) {
+        const c = source[cursor];
+        if (!(isAsciiIdentifierPart(c) or c == '-' or c == '.' or c == ':' or c >= 0x80)) break;
+        cursor += codePointLen(source, cursor);
+    }
+    return cursor;
+}
+
+// TSX accepts contextual/type words as parameter names, but not ECMAScript
+// reserved words. Keeping that exact boundary avoids stealing valid JSX tags.
+fn isDisallowedTypeParameterName(name: []const u8) bool {
+    return eqlAny(name, &.{
+        "break",    "case",    "catch",  "class",      "const", "continue",
+        "debugger", "default", "delete", "do",         "else",  "enum",
+        "export",   "extends", "false",  "finally",    "for",   "function",
+        "if",       "import",  "in",     "instanceof", "new",   "null",
+        "return",   "super",   "switch", "this",       "throw", "true",
+        "try",      "typeof",  "var",    "void",       "while", "with",
+    });
+}
 
 fn lineTerminatorLen(source: []const u8, index: usize) usize {
     if (index >= source.len) return 0;
@@ -1164,19 +1262,97 @@ test "JSX child text and attributes are data, JSX expressions are code" {
         \\    }</span>
         \\  </div>
         \\</>; // tail
-        \\const id = <T,>(x: T) => x; // generic arrow
         \\
     ;
     var result = try stripAlloc(std.testing.allocator, source, .{ .jsx = true });
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 4), result.comments_removed);
+    try std.testing.expectEqual(@as(usize, 3), result.comments_removed);
     try expectPreserved(result, "title=\"// attribute text\"");
     try expectPreserved(result, "/* child text */");
-    try expectPreserved(result, "const id = <T,>(x: T) => x;");
     try expectRemoved(result, "expression comment");
     try expectRemoved(result, "expression line comment");
+    try expectRemoved(result, "tail");
+    try expectStableLayout(source, result.code);
+}
+
+test "TSX generic arrows remain code" {
+    const source =
+        \\const id = <T,>(x: T) => x; // generic arrow
+        \\const constrained = <T extends U>(x: T) => x; // constrained generic
+        \\const immutable = <const T,>(x: T) => x; // const generic
+        \\const multiline = <T,> // line generic trivia
+        \\(x: T) => x; // multiline generic
+        \\const blocked = <T,> /* block generic trivia */ (x: T) => x; // blocked generic
+        \\const precomma = <T // pre-comma generic trivia
+        \\,>(x: T) => x; // pre-comma generic
+        \\const precomma_block = <T /* > in generic trivia */ ,>(x: T) => x; // pre-comma block generic
+        \\const templated = <T extends `a,b>`,>(x: T) => x; // template generic
+        \\const typed = <T,>(x: T): T => x; // return type generic
+        \\const regex_default = <T,>(x = /[)]/) => x; // regex default generic
+        \\const nested = <T extends Box<Result<U>>,>(x: T) => x; // nested generic
+        \\const callable = <T extends (x: X) => Y,>(x: T) => x; // callable generic
+        \\const unicode = <É extends U>(x: É) => x; // unicode generic
+        \\
+    ;
+    var result = try stripAlloc(std.testing.allocator, source, .{ .jsx = true, .typescript = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 17), result.comments_removed);
+    try expectPreserved(result, "const id = <T,>(x: T) => x;");
+    try expectPreserved(result, "const constrained = <T extends U>(x: T) => x;");
+    try expectPreserved(result, "const immutable = <const T,>(x: T) => x;");
+    try expectPreserved(result, "const multiline = <T,>");
+    try expectPreserved(result, "const blocked = <T,>");
+    try expectPreserved(result, "const precomma = <T");
+    try expectPreserved(result, "const precomma_block = <T");
+    try expectPreserved(result, "const templated = <T extends `a,b>`,>");
+    try expectPreserved(result, "const typed = <T,>(x: T): T => x;");
+    try expectPreserved(result, "const regex_default = <T,>(x = /[)]/) => x;");
+    try expectPreserved(result, "const nested = <T extends Box<Result<U>>,>(x: T) => x;");
+    try expectPreserved(result, "const callable = <T extends (x: X) => Y,>(x: T) => x;");
+    try expectPreserved(result, "const unicode = <É extends U>(x: É) => x;");
+    try expectRemoved(result, "line generic trivia");
+    try expectRemoved(result, "block generic trivia");
+    try expectRemoved(result, "pre-comma generic trivia");
+    try expectRemoved(result, "> in generic trivia");
     try expectRemoved(result, "generic arrow");
+    try expectStableLayout(source, result.code);
+}
+
+test "JSX tag syntax wins over generic arrow markers" {
+    const source =
+        "const bare_const = <const>(go to https://example.com)</const>; // bare const tail\n" ++
+        "const bare_extends = <extends>(go to https://example.com)</extends>; // bare extends tail\n" ++
+        "const const_extends = <const extends U>(go to https://example.com)</const>; // const extends tail\n" ++
+        "const extends_extends = <extends extends U>(go to https://example.com)</extends>; // extends tail\n" ++
+        "const member = <Foo.Bar extends U>(go to https://example.com)</Foo.Bar>; // member tail\n" ++
+        "const hyphen = <x-y extends U>(go to https://example.com)</x-y>; // hyphen tail\n" ++
+        "const unicode_name = <T extendsé U>(go to https://example.com)</T>; // unicode name tail\n" ++
+        "const hyphen_attr = <Text extends-data values={[1, 2]}>(go to https://example.com)</Text>; // hyphen attr tail\n" ++
+        "const javascript_extends = <A extends U>(go to https://example.com)</A>; // JavaScript extends tail\n" ++
+        "const single = <const T>(go to https://example.com)</const>; // single tail\n" ++
+        "const view = <const T extends={{ mode: \"wide\" }} /* sizes: small, medium */ values={[1, 2]} label={`}`}>(go to https://example.com)</const>; // tail\n";
+    var result = try stripAlloc(std.testing.allocator, source, .{ .jsx = true });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 12), result.comments_removed);
+    try expectPreserved(result, "<const>(go to https://example.com)</const>;");
+    try expectPreserved(result, "<extends>(go to https://example.com)</extends>;");
+    try expectPreserved(result, "<const extends U>(go to https://example.com)</const>;");
+    try expectPreserved(result, "<extends extends U>(go to https://example.com)</extends>;");
+    try expectPreserved(result, "<Foo.Bar extends U>(go to https://example.com)</Foo.Bar>;");
+    try expectPreserved(result, "<x-y extends U>(go to https://example.com)</x-y>;");
+    try expectPreserved(result, "<T extendsé U>(go to https://example.com)</T>;");
+    try expectPreserved(result, "<Text extends-data values={[1, 2]}>(go to https://example.com)</Text>;");
+    try expectPreserved(result, "<A extends U>(go to https://example.com)</A>;");
+    try expectPreserved(result, "<const T>(go to https://example.com)</const>;");
+    try expectRemoved(result, "sizes: small, medium");
+    try expectPreserved(result, "extends={{ mode: \"wide\" }}");
+    try expectPreserved(result, "values={[1, 2]}");
+    try expectPreserved(result, "label={`}`}");
+    try expectPreserved(result, "https://example.com");
+    try expectRemoved(result, "tail");
     try expectStableLayout(source, result.code);
 }
 
