@@ -39,8 +39,10 @@ pub const Plugin = struct {
     pub fn stripAlloc(self: *const Plugin, allocator: Allocator, source: []const u8, invocation: Invocation) !Result {
         return switch (self.implementation) {
             .ecmascript => blk: {
-                const jsx = resolveJsx(invocation);
-                const result = try javascript.stripAlloc(allocator, source, .{ .jsx = jsx });
+                const result = try javascript.stripAlloc(allocator, source, .{
+                    .jsx = resolveJsx(invocation),
+                    .typescript = resolveTypeScript(invocation),
+                });
                 break :blk .{ .code = result.code, .comments_removed = result.comments_removed };
             },
             .generic => |profile| blk: {
@@ -314,11 +316,25 @@ fn genericPlugin(
 
 fn resolveJsx(invocation: Invocation) bool {
     if (invocation.jsx_override) |value| return value;
+    if (invocation.language) |name| return !isPlainTypeScriptName(name);
+    if (invocation.path) |path| return !isPlainTypeScriptPath(path);
+    return true;
+}
+
+fn isPlainTypeScriptName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "typescript") or std.ascii.eqlIgnoreCase(name, "ts");
+}
+
+fn isPlainTypeScriptPath(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".ts") or endsWithIgnoreCase(path, ".mts") or endsWithIgnoreCase(path, ".cts");
+}
+
+fn resolveTypeScript(invocation: Invocation) bool {
     if (invocation.language) |name| {
-        if (std.ascii.eqlIgnoreCase(name, "jsx") or std.ascii.eqlIgnoreCase(name, "tsx")) return true;
+        return isPlainTypeScriptName(name) or std.ascii.eqlIgnoreCase(name, "tsx");
     }
     if (invocation.path) |path| {
-        return endsWithIgnoreCase(path, ".jsx") or endsWithIgnoreCase(path, ".tsx");
+        return isPlainTypeScriptPath(path) or endsWithIgnoreCase(path, ".tsx");
     }
     return false;
 }
@@ -352,6 +368,139 @@ test "all stripping routes through plugins" {
     defer py.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), py.comments_removed);
     try std.testing.expect(std.mem.indexOf(u8, py.code, "# keep") != null);
+}
+
+test "JavaScript inputs are JSX-capable by default" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+    const source =
+        \\const Link = () => <Text>Read https://example.com before continuing.</Text>;
+        \\// remove
+        \\
+    ;
+    const invocations = [_]Invocation{
+        .{ .path = "app.js" },
+        .{ .path = "app.mjs" },
+        .{ .path = "app.cjs" },
+        .{},
+        .{ .language = "javascript" },
+        .{ .language = "js" },
+        .{ .language = "ecmascript" },
+    };
+
+    for (invocations) |invocation| {
+        var result = try system.stripAlloc(allocator, source, invocation);
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "https://example.com before continuing.</Text>;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
+        try std.testing.expectEqual(source.len, result.code.len);
+    }
+}
+
+test "JavaScript JSX text may contain apostrophes by default" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+    const source = "const Link = () => <Text>You're almost there!</Text>; // remove\n";
+    const invocations = [_]Invocation{
+        .{ .path = "app.js" },
+        .{ .path = "app.mjs" },
+        .{ .path = "app.cjs" },
+        .{},
+        .{ .language = "javascript" },
+    };
+
+    for (invocations) |invocation| {
+        var result = try system.stripAlloc(allocator, source, invocation);
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "You're almost there!</Text>;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
+        try std.testing.expectEqual(source.len, result.code.len);
+    }
+}
+
+test "JavaScript JSX wins over TypeScript generic syntax" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+    const source = "const view = <A extends U>(go to https://example.com)</A>; // remove\n";
+    const invocations = [_]Invocation{
+        .{ .path = "app.js" },
+        .{ .path = "app.mjs" },
+        .{ .path = "app.cjs" },
+        .{ .path = "app.jsx" },
+        .{},
+        .{ .language = "javascript" },
+        .{ .language = "jsx" },
+    };
+
+    for (invocations) |invocation| {
+        var result = try system.stripAlloc(allocator, source, invocation);
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "https://example.com)</A>;") != null);
+    }
+}
+
+test "TypeScript inputs keep JSX disabled unless requested" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+    const source = "const value = <string>input; // remove\n";
+    const invocations = [_]Invocation{
+        .{ .path = "app.ts" },
+        .{ .path = "app.mts" },
+        .{ .path = "app.cts" },
+        .{ .language = "typescript" },
+        .{ .language = "ts" },
+    };
+
+    for (invocations) |invocation| {
+        var result = try system.stripAlloc(allocator, source, invocation);
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "<string>input") != null);
+    }
+
+    var tsx = try system.stripAlloc(
+        allocator,
+        "const id = <T,>(x: T) => x; // remove\n",
+        .{ .path = "app.tsx" },
+    );
+    defer tsx.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), tsx.comments_removed);
+    try std.testing.expect(std.mem.indexOf(u8, tsx.code, "<T,>(x: T) => x") != null);
+}
+
+test "explicit JSX overrides win over language and extension defaults" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+
+    try std.testing.expect(!resolveJsx(.{ .path = "app.js", .jsx_override = false }));
+    try std.testing.expect(resolveJsx(.{ .path = "app.ts", .jsx_override = true }));
+    try std.testing.expect(!resolveJsx(.{ .language = "typescript", .path = "app.js" }));
+    try std.testing.expect(resolveJsx(.{ .language = "javascript", .path = "app.ts" }));
+    try std.testing.expect(!resolveTypeScript(.{ .path = "app.js" }));
+    try std.testing.expect(resolveTypeScript(.{ .path = "app.tsx" }));
+    try std.testing.expect(!resolveTypeScript(.{ .language = "javascript", .path = "app.tsx" }));
+    try std.testing.expect(resolveTypeScript(.{ .language = "tsx", .path = "app.js" }));
+
+    try std.testing.expectError(
+        error.UnterminatedString,
+        system.stripAlloc(
+            allocator,
+            "const Link = () => <Text>you're ready</Text>;",
+            .{ .path = "app.js", .jsx_override = false },
+        ),
+    );
+
+    var relational = try system.stripAlloc(
+        allocator,
+        "const obj = { of: 1 }; const Right = 2; const value = 3; const x = obj.of<Right>value; // remove\n",
+        .{ .path = "app.js", .jsx_override = false },
+    );
+    defer relational.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), relational.comments_removed);
+    try std.testing.expect(std.mem.indexOf(u8, relational.code, "obj.of<Right>value") != null);
 }
 
 test "zig multiline string literals are never scanned for comments" {

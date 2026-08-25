@@ -182,59 +182,139 @@ fn emitOne(io: Io, allocator: Allocator, cli: Cli) !u8 {
     return 0;
 }
 
-fn writeFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
-    for (cli.inputs.items) |path| {
-        var result = stripPath(io, allocator, path, cli.language, cli.jsx_override) catch |err| {
-            reportPathError(path, err);
-            return error.Reported;
-        };
-        defer result.deinit(allocator);
-        if (result.comments_removed == 0) continue;
+const WriteBatchResult = struct {
+    rewritten_files: usize = 0,
+    unchanged_files: usize = 0,
+    failed_files: usize = 0,
 
-        const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
-            reportPathError(path, err);
-            return error.Reported;
-        };
-        const stat = file.stat(io) catch |err| {
-            file.close(io);
-            reportPathError(path, err);
-            return error.Reported;
-        };
-        file.close(io);
-        writeAtomic(io, path, result.code, stat.permissions) catch |err| {
-            reportPathError(path, err);
-            return error.Reported;
-        };
+    fn exitCode(self: WriteBatchResult) u8 {
+        return if (self.failed_files == 0) 0 else 2;
     }
-    return 0;
+};
+
+const CheckBatchResult = struct {
+    files_with_comments: usize = 0,
+    clean_files: usize = 0,
+    failed_files: usize = 0,
+
+    fn exitCode(self: CheckBatchResult) u8 {
+        if (self.failed_files != 0) return 2;
+        return if (self.files_with_comments == 0) 0 else 1;
+    }
+};
+
+fn writeFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
+    const batch = try processWriteFiles(io, allocator, cli.inputs.items, cli.language, cli.jsx_override);
+    if (batch.failed_files != 0 and cli.inputs.items.len > 1) reportWriteBatch(batch);
+    return batch.exitCode();
+}
+
+fn processWriteFiles(
+    io: Io,
+    allocator: Allocator,
+    paths: []const []const u8,
+    language_name: ?[]const u8,
+    jsx_override: ?bool,
+) !WriteBatchResult {
+    var batch: WriteBatchResult = .{};
+    for (paths) |path| {
+        const written = rewritePath(io, allocator, path, language_name, jsx_override) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            reportPathError(path, err);
+            batch.failed_files += 1;
+            continue;
+        };
+        if (written) {
+            batch.rewritten_files += 1;
+        } else {
+            batch.unchanged_files += 1;
+        }
+    }
+    std.debug.assert(batch.rewritten_files + batch.unchanged_files + batch.failed_files == paths.len);
+    return batch;
+}
+
+fn rewritePath(io: Io, allocator: Allocator, path: []const u8, language_name: ?[]const u8, jsx_override: ?bool) !bool {
+    var result = try stripPath(io, allocator, path, language_name, jsx_override);
+    defer result.deinit(allocator);
+    if (result.comments_removed == 0) return false;
+
+    const file = try Io.Dir.cwd().openFile(io, path, .{});
+    const stat = file.stat(io) catch |err| {
+        file.close(io);
+        return err;
+    };
+    file.close(io);
+    try writeAtomic(io, path, result.code, stat.permissions);
+    return true;
 }
 
 fn checkFiles(io: Io, allocator: Allocator, cli: Cli) !u8 {
-    var changed = false;
     if (cli.inputs.items.len == 0) {
-        var result = stripPath(io, allocator, "-", cli.language, cli.jsx_override) catch |err| {
+        const comments_removed = countPathComments(io, allocator, "-", cli.language, cli.jsx_override) catch |err| {
             reportPathError("stdin", err);
             return error.Reported;
         };
-        defer result.deinit(allocator);
-        if (result.comments_removed != 0) {
-            std.debug.print("stdin: {d} comment{s}\n", .{ result.comments_removed, if (result.comments_removed == 1) "" else "s" });
-            changed = true;
-        }
-    } else {
-        for (cli.inputs.items) |path| {
-            var result = stripPath(io, allocator, path, cli.language, cli.jsx_override) catch |err| {
-                reportPathError(path, err);
-                return error.Reported;
-            };
-            defer result.deinit(allocator);
-            if (result.comments_removed != 0) {
-                std.debug.print("{s}: {d} comment{s}\n", .{ path, result.comments_removed, if (result.comments_removed == 1) "" else "s" });
-                changed = true;
-            }
+        reportCommentCount("stdin", comments_removed);
+        return if (comments_removed == 0) 0 else 1;
+    }
+
+    const batch = try processCheckFiles(io, allocator, cli.inputs.items, cli.language, cli.jsx_override);
+    if (batch.failed_files != 0 and cli.inputs.items.len > 1) reportCheckBatch(batch);
+    return batch.exitCode();
+}
+
+fn processCheckFiles(
+    io: Io,
+    allocator: Allocator,
+    paths: []const []const u8,
+    language_name: ?[]const u8,
+    jsx_override: ?bool,
+) !CheckBatchResult {
+    var batch: CheckBatchResult = .{};
+    for (paths) |path| {
+        const comments_removed = countPathComments(io, allocator, path, language_name, jsx_override) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            reportPathError(path, err);
+            batch.failed_files += 1;
+            continue;
+        };
+        if (comments_removed == 0) {
+            batch.clean_files += 1;
+        } else {
+            batch.files_with_comments += 1;
+            reportCommentCount(path, comments_removed);
         }
     }
-    return if (changed) 1 else 0;
+    std.debug.assert(batch.files_with_comments + batch.clean_files + batch.failed_files == paths.len);
+    return batch;
+}
+
+fn countPathComments(io: Io, allocator: Allocator, path: []const u8, language_name: ?[]const u8, jsx_override: ?bool) !usize {
+    var result = try stripPath(io, allocator, path, language_name, jsx_override);
+    defer result.deinit(allocator);
+    return result.comments_removed;
+}
+
+fn reportCommentCount(path: []const u8, comments_removed: usize) void {
+    if (comments_removed == 0) return;
+    std.debug.print("{s}: {d} comment{s}\n", .{ path, comments_removed, if (comments_removed == 1) "" else "s" });
+}
+
+fn reportWriteBatch(batch: WriteBatchResult) void {
+    const attempted = batch.rewritten_files + batch.unchanged_files + batch.failed_files;
+    std.debug.print(
+        "decomment: --write incomplete: {d} files attempted; {d} rewritten, {d} unchanged, {d} failed\n",
+        .{ attempted, batch.rewritten_files, batch.unchanged_files, batch.failed_files },
+    );
+}
+
+fn reportCheckBatch(batch: CheckBatchResult) void {
+    const attempted = batch.files_with_comments + batch.clean_files + batch.failed_files;
+    std.debug.print(
+        "decomment: --check incomplete: {d} files attempted; {d} with comments, {d} clean, {d} failed\n",
+        .{ attempted, batch.files_with_comments, batch.clean_files, batch.failed_files },
+    );
 }
 
 fn stripPath(io: Io, allocator: Allocator, path: []const u8, language_name: ?[]const u8, jsx_override: ?bool) !decomment.Result {
@@ -304,14 +384,15 @@ fn friendlyError(err: anyerror) []const u8 {
 }
 
 const usage =
-    \\Usage: decomment [OPTIONS] [FILE]
+    \\Usage: decomment [OPTIONS] [FILE...]
     \\
     \\Remove comments from source code through one plugin-driven system.
-    \\The language plugin is detected from FILE; stdin defaults to ECMAScript/JavaScript.
+    \\The language plugin is detected from FILE; stdin defaults to JSX-capable JavaScript.
+    \\Multi-file modes attempt every input and exit 2 after a summary if any input fails.
     \\
     \\Options:
     \\  -w, --write          Rewrite one or more files atomically in place
-    \\  -c, --check          Report files containing comments; exit 1 if found
+    \\  -c, --check          Report comments; exit 1 if found, or 2 if incomplete
     \\  -o, --output PATH    Write one input to PATH instead of stdout
     \\  -l, --language NAME  Override language-plugin detection
     \\      --list-languages List built-in internal plugins and accepted language names
@@ -341,4 +422,11 @@ test "parse write mode and language" {
 test "reject conflicting modes" {
     const args = [_][]const u8{ "decomment", "--write", "--check", "a.ts" };
     try std.testing.expectError(error.ConflictingModes, parseArgs(std.testing.allocator, &args));
+}
+
+test "parse explicit JSX override" {
+    const args = [_][]const u8{ "decomment", "--no-jsx", "app.js" };
+    var cli = try parseArgs(std.testing.allocator, &args);
+    defer cli.inputs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(false, cli.jsx_override.?);
 }

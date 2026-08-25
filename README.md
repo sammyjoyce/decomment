@@ -41,6 +41,8 @@ decomment --check src/app.ts src/main.c scripts/tool.py
 decomment --list-languages
 ```
 
+Multi-file `--write` and `--check` runs attempt every input in argument order. A file-level read, parse, or write error is reported immediately, later files are still processed, and an incomplete run ends with a summary on stderr. `--write` exits `0` when every file succeeds and `2` if any file fails. `--check` exits `0` when every file is comment-free, `1` when comments are found, and `2` when any file could not be checked. Successful rewrites remain in place if another file fails; atomicity is per file, not across the whole batch.
+
 ## ECMAScript plugin
 
 The internal `ecmascript` plugin accepts these language names:
@@ -51,6 +53,8 @@ The internal `ecmascript` plugin accepts these language names:
 - `tsx`
 
 and detects `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts`, `.jsx`, and `.tsx`.
+
+JSX-capable inputs (`.js`, `.mjs`, `.cjs`, `.jsx`, and `.tsx`) use JSX scanning by default, as does pathless stdin. Plain TypeScript inputs (`.ts`, `.mts`, and `.cts`) keep JSX disabled because TypeScript reserves JSX syntax for `.tsx`. Within JSX mode, `.tsx` remains TypeScript-aware so generic arrow functions stay code, while JavaScript and JSX prefer valid tag syntax when the grammars overlap. An explicit language takes precedence over the extension. Use `--no-jsx` for JavaScript that must treat an ambiguous `<Name>` sequence as relational syntax, or `--jsx` to force JSX handling for another ECMAScript input.
 
 Its dedicated syntax-aware scanner remains intact, including regular-expression literals, templates, JSX/TSX, ASI-sensitive cases, hashbangs, and token-boundary preservation. The important architectural change is that this scanner is now reachable only through the same plugin interface as every other language.
 

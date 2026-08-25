@@ -42,7 +42,23 @@ pub fn build(b: *std.Build) void {
     const cli_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
+    const cli_integration_options = b.addOptions();
+    cli_integration_options.addOptionPath("decomment_exe", exe.getEmittedBin());
+    const cli_integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli_integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "cli_integration_options",
+                .module = cli_integration_options.createModule(),
+            }},
+        }),
+    });
+    const run_cli_integration_tests = b.addRunArtifact(cli_integration_tests);
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_module_tests.step);
     test_step.dependOn(&run_cli_tests.step);
+    test_step.dependOn(&run_cli_integration_tests.step);
 }
