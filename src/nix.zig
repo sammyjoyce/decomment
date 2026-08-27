@@ -98,7 +98,7 @@ const Scanner = struct {
     }
 
     fn canStartIndentedString(self: *const Scanner) bool {
-        return self.i == 0 or !isIdentifierChar(self.source[self.i - 1]);
+        return self.i == 0 or !isIdentifierStartChar(self.source[self.i - 1]);
     }
 
     fn scanQuotedString(self: *Scanner) StripError!void {
@@ -206,7 +206,7 @@ const Scanner = struct {
     }
 
     fn lookupPathEnd(self: *const Scanner) ?usize {
-        if (self.source[self.i] != '<' or !self.canStartLookupPath()) return null;
+        if (self.source[self.i] != '<') return null;
         var cursor = self.i + 1;
         var segment_len: usize = 0;
         while (cursor < self.source.len) : (cursor += 1) {
@@ -223,17 +223,8 @@ const Scanner = struct {
         return null;
     }
 
-    fn canStartLookupPath(self: *const Scanner) bool {
-        if (self.i == 0) return true;
-        const previous = self.source[self.i - 1];
-        return isWhitespaceByte(previous) or switch (previous) {
-            '(', '[', '{', '=', ':', ';', ',', '?', '+', '-', '*', '/', '!', '&', '|', '>' => true,
-            else => false,
-        };
-    }
-
     fn uriEnd(self: *const Scanner) ?usize {
-        if (!isAsciiAlpha(self.source[self.i]) or !self.canStartUri()) return null;
+        if (!isAsciiAlpha(self.source[self.i])) return null;
         var cursor = self.i + 1;
         while (cursor < self.source.len and isUriSchemeChar(self.source[cursor])) : (cursor += 1) {}
         if (cursor >= self.source.len or self.source[cursor] != ':') return null;
@@ -241,10 +232,6 @@ const Scanner = struct {
         const body_start = cursor;
         while (cursor < self.source.len and isUriBodyChar(self.source[cursor])) : (cursor += 1) {}
         return if (cursor != body_start) cursor else null;
-    }
-
-    fn canStartUri(self: *const Scanner) bool {
-        return self.i == 0 or !isIdentifierChar(self.source[self.i - 1]);
     }
 
     fn startsWith(self: *const Scanner, needle: []const u8) bool {
@@ -300,8 +287,8 @@ fn isPathChar(c: u8) bool {
     return isAsciiAlpha(c) or isAsciiDigit(c) or c == '.' or c == '_' or c == '-' or c == '+';
 }
 
-fn isIdentifierChar(c: u8) bool {
-    return isAsciiAlpha(c) or isAsciiDigit(c) or c == '_' or c == '\'' or c == '-';
+fn isIdentifierStartChar(c: u8) bool {
+    return isAsciiAlpha(c) or c == '_';
 }
 
 fn isUriSchemeChar(c: u8) bool {
@@ -472,6 +459,20 @@ test "Nix identifiers ending in apostrophes do not start indented strings" {
     try expectStableLayout(source, result.code);
 }
 
+test "Nix indented strings may follow non-identifier expressions without whitespace" {
+    const source =
+        \\1''# literal text'' # remove
+        \\
+    ;
+    var result = try stripAlloc(std.testing.allocator, source);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "# literal text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
+    try expectStableLayout(source, result.code);
+}
+
 test "Nix nested interpolation resumes the containing string" {
     const source =
         \\"outer ${"inner ${let x = 1; # nested line
@@ -583,6 +584,34 @@ test "Nix interpolation keeps URI and lookup path tokens intact" {
     try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "https://example.test/a?x=1&y=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "<nixpkgs/path>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
+    try expectStableLayout(source, result.code);
+}
+
+test "Nix lookup paths may follow expressions without whitespace" {
+    const source =
+        \\1<nixpkgs/path> # remove
+        \\
+    ;
+    var result = try stripAlloc(std.testing.allocator, source);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "<nixpkgs/path>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
+    try expectStableLayout(source, result.code);
+}
+
+test "Nix URI literals may follow expressions without whitespace" {
+    const source =
+        \\1http://example.test/a/*literal*/ # remove
+        \\
+    ;
+    var result = try stripAlloc(std.testing.allocator, source);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.comments_removed);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "http://example.test/a/*literal*/") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "remove") == null);
     try expectStableLayout(source, result.code);
 }
