@@ -25,11 +25,13 @@ This mirrors spatiotemporal composition at the plugin boundary: reversible insta
 # Auto-detect the internal plugin from the extension
 decomment src/app.ts > build/app.ts
 decomment src/main.c > build/main.c
+decomment flake.nix > flake.clean.nix
 decomment tool.py > tool.clean.py
 
 # Explicit plugin/language name, useful for stdin
 cat query.sql | decomment --language sql
 cat component.tsx | decomment --language tsx
+cat expression.nix | decomment --language nix
 
 # Rewrite files atomically
 decomment --write src/app.ts src/main.c scripts/tool.py
@@ -60,7 +62,7 @@ Its dedicated syntax-aware scanner remains intact, including regular-expression 
 
 ## Built-in plugins
 
-The system includes internal plugins for ECMAScript, C, C++, Java, C#, Go, Rust, Zig, Swift, Kotlin, Dart, PHP, Python, shell, SQL, CSS, SCSS/Sass/Less, HTML, XML/SVG, Haskell, OCaml, Lua, PowerShell, R, and JSONC.
+The system includes internal plugins for ECMAScript, C, C++, Java, C#, Go, Rust, Zig, Nix, Swift, Kotlin, Dart, PHP, Python, shell, SQL, CSS, SCSS/Sass/Less, HTML, XML/SVG, Haskell, OCaml, Lua, PowerShell, R, and JSONC.
 
 Some generic-profile plugins still have explicitly documented lexical gaps: Rust raw strings, SQL dialect-specific dollar quoting, and Lua long brackets with equals signs. Those can be replaced by dedicated plugin implementations without changing the `System` API or the other plugins.
 
@@ -80,6 +82,12 @@ const help =
 ```
 
 Both `//` sequences above survive stripping. This is expressed in the generic engine as `Profile.line_strings`, a literal that begins with a prefix and ends at the line break.
+
+## Nix plugin
+
+The internal `nix` plugin accepts the language name `nix` and detects `.nix` files.
+
+It removes `#` line comments and non-nested `/* ... */` block comments with a dedicated syntax-aware scanner. Double-quoted strings, indented strings, their escape forms, URI literals, and lookup paths preserve comment-looking text. `${ ... }` interpolation in strings, paths, and dynamic attribute names is scanned as Nix code, including nested strings, interpolations, and attribute-set braces, so comments inside interpolated expressions are removed without ending the surrounding literal early. A leading Nix hashbang is preserved.
 
 ## Library
 

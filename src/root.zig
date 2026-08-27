@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const javascript = @import("javascript.zig");
+const nix = @import("nix.zig");
 const generic = @import("generic.zig");
 
 pub const Result = struct {
@@ -33,6 +34,7 @@ pub const Plugin = struct {
 
     pub const Implementation = union(enum) {
         ecmascript,
+        nix,
         generic: *const generic.Profile,
     };
 
@@ -43,6 +45,10 @@ pub const Plugin = struct {
                     .jsx = resolveJsx(invocation),
                     .typescript = resolveTypeScript(invocation),
                 });
+                break :blk .{ .code = result.code, .comments_removed = result.comments_removed };
+            },
+            .nix => blk: {
+                const result = try nix.stripAlloc(allocator, source);
                 break :blk .{ .code = result.code, .comments_removed = result.comments_removed };
             },
             .generic => |profile| blk: {
@@ -253,6 +259,12 @@ pub const plugins = struct {
     pub const powershell = genericPlugin("powershell", &.{ "powershell", "ps1" }, &.{ ".ps1", ".psm1", ".psd1" }, &powershell_profile, "");
     pub const r = genericPlugin("r", &.{"r"}, &.{ ".r", ".R" }, &hash_profile, "");
     pub const jsonc = genericPlugin("jsonc", &.{"jsonc"}, &.{".jsonc"}, &c_profile, "");
+    pub const nix = Plugin{
+        .id = "nix",
+        .names = &.{"nix"},
+        .extensions = &.{".nix"},
+        .implementation = .nix,
+    };
 };
 
 pub const builtin_plugins = [_]*const Plugin{
@@ -281,6 +293,7 @@ pub const builtin_plugins = [_]*const Plugin{
     &plugins.powershell,
     &plugins.r,
     &plugins.jsonc,
+    &plugins.nix,
 };
 
 pub fn builtinSystem() System {
@@ -534,6 +547,33 @@ test "zig plugin also resolves zon" {
     try std.testing.expect(system.resolvePath("build.zig.zon") == &plugins.zig);
     try std.testing.expect(system.resolvePath("src/main.zig") == &plugins.zig);
     try std.testing.expect(system.resolveName("zon") == &plugins.zig);
+}
+
+test "Nix uses its dedicated scanner through the plugin system" {
+    const allocator = std.testing.allocator;
+    var system = builtinSystem();
+
+    try std.testing.expect(system.resolvePath("flake.nix") == &plugins.nix);
+    try std.testing.expect(system.resolveName("nix") == &plugins.nix);
+
+    const source =
+        \\{
+        \\  script = ''
+        \\    # preserved shell text
+        \\    ${let x = 1; # removed Nix comment
+        \\      in x}
+        \\  '';
+        \\} # removed outer comment
+        \\
+    ;
+    var result = try system.stripAlloc(allocator, source, .{ .path = "flake.nix" });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), result.comments_removed);
+    try std.testing.expectEqual(source.len, result.code.len);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "# preserved shell text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "removed Nix comment") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "removed outer comment") == null);
 }
 
 test "plugin dependencies behave as reactive coeffects" {

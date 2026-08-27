@@ -138,3 +138,60 @@ test "multi-file check continues after a malformed input" {
     try std.testing.expectEqualStrings(clean_source, clean);
     try std.testing.expectEqualStrings(c_source, c);
 }
+
+test "Nix files are detected and preserve comments only inside literals" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\{
+        \\  script = ''
+        \\    # shell text
+        \\    ${let value = { nested = 1; }; # Nix interpolation comment
+        \\      in value.nested}
+        \\  '';
+        \\} # Nix outer comment
+        \\
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "flake.nix", .data = source });
+
+    const decomment_exe = try decommentExecutablePath(io, allocator);
+    defer allocator.free(decomment_exe);
+
+    const decomment_argv = [_][]const u8{ decomment_exe, "--write", "flake.nix" };
+    const decomment_result = try std.process.run(allocator, io, .{
+        .argv = &decomment_argv,
+        .cwd = .{ .dir = tmp.dir },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(4096),
+    });
+    defer allocator.free(decomment_result.stdout);
+    defer allocator.free(decomment_result.stderr);
+
+    try expectExited(decomment_result.term, 0);
+    try std.testing.expectEqualStrings("", decomment_result.stdout);
+    try std.testing.expectEqualStrings("", decomment_result.stderr);
+
+    const cleaned = try readTestFile(tmp.dir, io, allocator, "flake.nix");
+    defer allocator.free(cleaned);
+    try std.testing.expectEqual(source.len, cleaned.len);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "# shell text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "Nix interpolation comment") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "Nix outer comment") == null);
+
+    const check_argv = [_][]const u8{ decomment_exe, "--check", "flake.nix" };
+    const check_result = try std.process.run(allocator, io, .{
+        .argv = &check_argv,
+        .cwd = .{ .dir = tmp.dir },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(4096),
+    });
+    defer allocator.free(check_result.stdout);
+    defer allocator.free(check_result.stderr);
+
+    try expectExited(check_result.term, 0);
+    try std.testing.expectEqualStrings("", check_result.stdout);
+    try std.testing.expectEqualStrings("", check_result.stderr);
+}

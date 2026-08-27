@@ -376,6 +376,8 @@ fn friendlyError(err: anyerror) []const u8 {
         error.UnterminatedTemplate => "unterminated template literal",
         error.UnterminatedTemplateExpression => "unterminated template expression",
         error.UnterminatedBlockComment => "unterminated block comment",
+        error.UnterminatedIndentedString => "unterminated indented string literal",
+        error.UnterminatedInterpolation => "unterminated interpolation",
         error.UnterminatedJsx => "unterminated JSX element",
         error.UnterminatedJsxExpression => "unterminated JSX expression",
         error.NestingTooDeep => "syntax nesting exceeds 1024 levels",
