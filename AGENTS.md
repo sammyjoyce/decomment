@@ -11,6 +11,7 @@
 - `src/nix.zig` is the dedicated syntax-aware Nix scanner.
 - `src/generic.zig` is the profile-driven scanner used by the remaining built-ins.
 - `src/main.zig` owns argument parsing, file I/O, diagnostics, exit codes, and atomic rewrites.
+- `.github/workflows/ci.yml` defines the CI checks that the full verification below mirrors.
 
 ## Commands
 
@@ -21,19 +22,20 @@ Use Zig 0.16.0. `nix develop` provides the pinned Zig and ZLS environment when N
 zig build run -- --version
 zig build run -- [decomment arguments]
 
-# Fast scanner/library tests while iterating.
+# Fast, file-scoped tests while iterating on the file you changed.
 zig test src/generic.zig
 zig test src/javascript.zig
 zig test src/nix.zig
 zig test src/root.zig
+zig test src/main.zig   # argument-parsing tests only
 
-# Full verification. This matches CI and must include both test and build.
+# Full verification before handing off a change. This matches CI and must include both test and build.
 zig fmt --check build.zig src
 zig build test
 zig build
 ```
 
-`zig build test` runs module tests, CLI unit tests, and subprocess integration tests against the emitted executable. CI runs the full verification on Linux, macOS, and Windows.
+`zig build test` runs module tests, CLI unit tests, and subprocess integration tests against the emitted executable. `src/cli_integration_test.zig` cannot be run with plain `zig test`; it needs the `cli_integration_options` module that only `zig build test` generates. CI runs the full verification on Linux, macOS, and Windows.
 
 Nix packaging is separate from normal Zig verification:
 
@@ -95,7 +97,7 @@ The CLI reads the complete input, then allocates a same-sized output buffer; the
 - `--check` with no paths checks stdin.
 - Multi-file `--write` and `--check` process inputs in argument order and continue after ordinary per-file errors; only out-of-memory aborts the loop.
 - Atomicity is per file, not per batch. Successful earlier rewrites remain if a later input fails.
-- Exit codes are part of the public contract: write uses `0`/`2`; check uses `0` for clean, `1` for comments found, and `2` for an incomplete run.
+- Exit codes are part of the public contract: emit and write use `0`/`2`; check uses `0` for clean, `1` for comments found, and `2` for an incomplete run. Usage errors and unhandled failures exit `2`.
 - Clean files are silent in check mode. Diagnostics and comment counts go to stderr.
 
 ## Testing conventions
